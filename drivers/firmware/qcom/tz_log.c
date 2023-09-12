@@ -18,13 +18,22 @@
 #include <linux/of.h>
 #include <linux/dma-buf.h>
 #include <linux/ion_kernel.h>
-
+#ifdef CONFIG_MSM_TZ_QSEE_LOG
+#include <linux/vmalloc.h>
+#endif
 #include <soc/qcom/scm.h>
 #include <soc/qcom/qseecomi.h>
 #include <soc/qcom/qtee_shmbridge.h>
 #ifdef CONFIG_MSM_TZ_QSEE_LOG
 #include <linux/vmalloc.h>
 #endif
+
+#ifndef CONFIG_DEBUG_FS
+#include <linux/proc_fs.h>
+static struct proc_dir_entry *tzdbg_root;
+#define TZDBG_ROOT_DIR "tzdbg"
+#endif
+
 
 #ifndef CONFIG_DEBUG_FS
 #include <linux/proc_fs.h>
@@ -1156,7 +1165,7 @@ static ssize_t tzdbgfs_read_unencrypted(struct file *file, char __user *buf,
 #ifdef CONFIG_DEBUG_FS
 	int tz_id = *(int *)(file->private_data);
 #else
-	int tz_id = *(int *)(long)PDE_DATA(file_inode(file));
+	int tz_id = *(int *)((struct seq_file *)file->private_data)->private;
 #endif
 
 	if (tz_id == TZDBG_BOOT || tz_id == TZDBG_RESET ||
@@ -1287,10 +1296,22 @@ static ssize_t tzdbgfs_read(struct file *file, char __user *buf,
 		return tzdbgfs_read_encrypted(file, buf, count, offp);
 }
 
+#ifndef CONFIG_DEBUG_FS
+
+static int tzdbg_proc_open(struct inode *inode, struct file *file)
+{
+    return single_open(file, NULL, PDE_DATA(inode));
+}
+#endif
+
 static const struct file_operations tzdbg_fops = {
 	.owner   = THIS_MODULE,
 	.read    = tzdbgfs_read,
+#ifdef CONFIG_DEBUG_FS
 	.open    = simple_open,
+#else
+    .open   = tzdbg_proc_open,
+#endif
 };
 
 
@@ -1491,7 +1512,7 @@ err:
 
     for (i = 0; i < TZDBG_STATS_MAX; i++) {
         tzdbg.debug_tz[i] = i;
-        proc_d_entry = proc_create_data(tzdbg.stat[i].name, 0444, tzdbg_root, &tzdbg_fops, &tzdbg.debug_tz[i]);
+        proc_d_entry = proc_create_data(tzdbg.stat[i].name, 0666, tzdbg_root, &tzdbg_fops, &tzdbg.debug_tz[i]);
         if (proc_d_entry == NULL) {
             dev_err(&pdev->dev, "TZ proc_create_data %s failed\n", tzdbg.stat[i].name);
             rc = -ENOMEM;
@@ -1499,12 +1520,18 @@ err:
         }
     }
 
+	tzdbg.disp_buf = kzalloc(max(debug_rw_buf_size,
+			tzdbg.hyp_debug_rw_buf_size), GFP_KERNEL);
+	if (tzdbg.disp_buf == NULL)
+		goto err;
+
     platform_set_drvdata(pdev, tzdbg_root);
 
     return 0;
 err:
     remove_proc_subtree(TZDBG_ROOT_DIR, NULL);
-    return rc;
+    return -1;
+
 #endif
 }
 
@@ -1515,7 +1542,11 @@ static void tzdbgfs_exit(struct platform_device *pdev)
 	dent_dir = platform_get_drvdata(pdev);
 	debugfs_remove_recursive(dent_dir);
 #else
+    kzfree(tzdbg.disp_buf);
     remove_proc_subtree(TZDBG_ROOT_DIR, NULL);
+    if (g_qsee_log)
+        dma_free_coherent(&pdev->dev, QSEE_LOG_BUF_SIZE,
+            (void *)g_qsee_log, coh_pmem);
 #endif
 }
 
@@ -1622,6 +1653,104 @@ static void tzdbg_encrypted_log_init(void)
 		pr_info("encrypted qseelog enabled is %d\n", desc.ret[0]);
 		tzdbg.is_encrypted_log_enabled = desc.ret[0];
 	}
+}
+#ifdef CONFIG_MSM_TZ_QSEE_LOG
+static int splitline_printk(const char *str, int len)
+{
+	int cnt = 0;
+	char *s = "\n";
+	char *b_str_tmp = NULL;
+	char *buf = NULL;
+
+	if (b_str == NULL && debug_rw_buf_size >0 ) {
+		b_str = (char *)vmalloc(debug_rw_buf_size +1);
+	}
+	if(len> debug_rw_buf_size) {
+		pr_err("[TEE-AP]:log is more than max len. trancate  \n");
+		len = debug_rw_buf_size;
+	}
+	b_str_tmp = b_str;
+	memcpy(b_str_tmp, str, len);
+	b_str_tmp[len] = 0;
+
+
+	buf = strstr(b_str_tmp, s);
+
+	while (buf != NULL) {
+		cnt++;
+		buf[0] = '\0';
+		pr_err("[TEE]: %s \n",b_str_tmp);
+		b_str_tmp = buf + strlen(s);
+		buf = strstr(b_str_tmp, s);
+	}
+
+	return 0;
+}
+
+static int _print_qsee_log_stats(struct tzdbg_log_t *log,
+						   struct tzdbg_log_pos_t *log_start, uint32_t log_len
+			)
+{
+	uint32_t wrap_start;
+	uint32_t wrap_end;
+	uint32_t wrap_cnt;
+	int max_len;
+	int len = 0;
+	int i = 0;
+
+	wrap_start = log_start->wrap;
+	wrap_end = log->log_pos.wrap;
+
+	/* Calculate difference in # of buffer wrap-arounds */
+	if (wrap_end >= wrap_start) {
+		wrap_cnt = wrap_end - wrap_start;
+	} else {
+		/* wrap counter has wrapped around, invalidate start position */
+		wrap_cnt = 2;
+	}
+
+	if (wrap_cnt > 1) {
+		/* end position has wrapped around more than once, */
+		/* current start no longer valid                   */
+		log_start->wrap = log->log_pos.wrap - 1;
+		log_start->offset = (log->log_pos.offset + 1) % log_len;
+	} else if ((wrap_cnt == 1) &&
+			   (log->log_pos.offset > log_start->offset)) {
+		/* end position has overwritten start */
+		log_start->offset = (log->log_pos.offset + 1) % log_len;
+	}
+
+	while (log_start->offset == log->log_pos.offset) {
+		/*
+		 * No data in ring buffer,
+		 * so we'll hang around until something happens
+		 */
+		unsigned long t = msleep_interruptible(50);
+
+		if (t != 0) {
+			/* Some event woke us up, so let's quit */
+			return 0;
+		}
+	}
+
+	max_len = debug_rw_buf_size;
+
+	/*
+	 *  Read from ring buff while there is data and space in return buff
+	 */
+	while ((log_start->offset != log->log_pos.offset) && (len < max_len)) {
+		tzdbg.disp_buf[i++] = log->log_buf[log_start->offset];
+		log_start->offset = (log_start->offset + 1) % log_len;
+		if (log_start->offset == 0)
+			++log_start->wrap;
+		++len;
+	}
+	tzdbg.stat[TZDBG_QSEE_LOG].data= tzdbg.disp_buf;
+	/*
+	 * print the display buffer
+	 */
+	splitline_printk(tzdbg.stat[TZDBG_QSEE_LOG].data,len);
+	return len;
 }
 
 #ifdef CONFIG_MSM_TZ_QSEE_LOG
@@ -2005,7 +2134,7 @@ static int tz_log_probe(struct platform_device *pdev)
 		INIT_WORK(&tzdbg.heartbeat_work,
 						tzdbg_heartbeat_work);
 		queue_work(tzdbg.heartbeat_work_q, &tzdbg.heartbeat_work);
-		dev_err(&pdev->dev, "%s: enable_printk_qseelog is set, is_enlarged=%d is_encrypted=%d\n", __func__,tzdbg.is_enlarged_buf,tzdbg.is_encrypted_log_enabled);
+		dev_err(&pdev->dev, "%s: enable_printk_qseelog is set\n", __func__);
 	}
 #endif
 	return 0;
@@ -2065,7 +2194,14 @@ static void __exit tz_log_exit(void)
 {
 	platform_driver_unregister(&tz_log_driver);
 }
-
+#ifdef CONFIG_MSM_TZ_QSEE_LOG
+static int __init setup_enable_printk_qseelog(char *buf)
+{
+	enable_printk_qseelog = true;
+	return 0;
+}
+early_param("printk_qseelog", setup_enable_printk_qseelog);
+#endif
 module_init(tz_log_init);
 module_exit(tz_log_exit);
 #ifdef CONFIG_MSM_TZ_QSEE_LOG

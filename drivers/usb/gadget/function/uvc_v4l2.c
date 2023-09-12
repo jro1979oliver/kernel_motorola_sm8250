@@ -251,10 +251,7 @@ uvc_v4l2_subscribe_event(struct v4l2_fh *fh,
 		uvc_function_connect(uvc);
 	}
 
-	if (!ret && sub->type == UVC_EVENT_UNBIND)
-		uvc->wait_for_close = true;
-
-	return ret;
+	return 0;
 }
 
 static void uvc_v4l2_disable(struct uvc_device *uvc)
@@ -337,6 +334,8 @@ uvc_v4l2_open(struct file *file)
 	handle->device = &uvc->video;
 	file->private_data = &handle->vfh;
 
+	uvc->open_count++;
+
 	return 0;
 }
 
@@ -357,6 +356,8 @@ uvc_v4l2_release(struct file *file)
 	v4l2_fh_del(&handle->vfh);
 	v4l2_fh_exit(&handle->vfh);
 	kfree(handle);
+
+	uvc->open_count--;
 
 	return 0;
 }

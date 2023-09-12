@@ -422,14 +422,6 @@ static ssize_t function_name_show(struct device *dev,
 
 static DEVICE_ATTR_RO(function_name);
 
-static void uvc_video_device_release(struct video_device *vdev)
-{
-	struct uvc_device *uvc = container_of(vdev, struct uvc_device, vdev);
-
-	memset(vdev, 0, sizeof(*vdev));
-	complete(&uvc->unbind_ok);
-}
-
 static int
 uvc_register_video(struct uvc_device *uvc)
 {
@@ -440,7 +432,7 @@ uvc_register_video(struct uvc_device *uvc)
 	uvc->vdev.v4l2_dev = &uvc->v4l2_dev;
 	uvc->vdev.fops = &uvc_v4l2_fops;
 	uvc->vdev.ioctl_ops = &uvc_v4l2_ioctl_ops;
-	uvc->vdev.release = uvc_video_device_release;
+	uvc->vdev.release = video_device_release_empty;
 	uvc->vdev.vfl_dir = VFL_DIR_TX;
 	uvc->vdev.lock = &uvc->video.mutex;
 	strlcpy(uvc->vdev.name, cdev->gadget->name, sizeof(uvc->vdev.name));
@@ -780,8 +772,6 @@ uvc_function_bind(struct usb_configuration *c, struct usb_function *f)
 		goto error;
 	}
 
-	reinit_completion(&uvc->unbind_ok);
-	uvc->wait_for_close = false;
 	return 0;
 
 error:
@@ -898,33 +888,37 @@ static struct usb_function_instance *uvc_alloc_inst(void)
 	return &opts->func_inst;
 }
 
+static void usb_uvc_free_work_func(struct work_struct *w)
+{
+	struct uvc_device *uvc =
+		container_of(w, struct uvc_device, free_work.work);
+
+	if (!uvc->open_count)
+		kfree(uvc);
+	else
+		schedule_delayed_work(&uvc->free_work, msecs_to_jiffies(2000));
+}
+
 static void uvc_free(struct usb_function *f)
 {
 	struct uvc_device *uvc = to_uvc(f);
 	struct f_uvc_opts *opts = container_of(f->fi, struct f_uvc_opts,
 					       func_inst);
 	--opts->refcnt;
-	kfree(uvc);
+
+	schedule_delayed_work(&uvc->free_work, msecs_to_jiffies(500));
 }
 
 static void uvc_unbind(struct usb_configuration *c, struct usb_function *f)
 {
 	struct usb_composite_dev *cdev = c->cdev;
 	struct uvc_device *uvc = to_uvc(f);
-	struct v4l2_event v4l2_event;
 
 	INFO(cdev, "%s\n", __func__);
-
-	memset(&v4l2_event, 0, sizeof(v4l2_event));
-	v4l2_event.type = UVC_EVENT_UNBIND;
-	v4l2_event_queue(&uvc->vdev, &v4l2_event);
 
 	device_remove_file(&uvc->vdev.dev, &dev_attr_function_name);
 	video_unregister_device(&uvc->vdev);
 	v4l2_device_unregister(&uvc->v4l2_dev);
-
-	if (uvc->wait_for_close)
-		wait_for_completion(&uvc->unbind_ok);
 
 	usb_ep_free_request(cdev->gadget->ep0, uvc->control_req);
 	kfree(uvc->control_buf);
@@ -942,8 +936,8 @@ static struct usb_function *uvc_alloc(struct usb_function_instance *fi)
 	if (uvc == NULL)
 		return ERR_PTR(-ENOMEM);
 
-	init_completion(&uvc->unbind_ok);
 	mutex_init(&uvc->video.mutex);
+	INIT_DELAYED_WORK(&uvc->free_work, usb_uvc_free_work_func);
 	uvc->state = UVC_STATE_DISCONNECTED;
 	opts = fi_to_f_uvc_opts(fi);
 

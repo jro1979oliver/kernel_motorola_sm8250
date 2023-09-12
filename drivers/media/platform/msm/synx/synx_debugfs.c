@@ -73,6 +73,7 @@ static ssize_t synx_table_read(struct file *file,
 			pr_debug("synx obj at %d invalid\n", index);
 			continue;
 		}
+		mutex_lock(&dev->row_locks[index]);
 
 		if (columns & NAME_COLUMN)
 			cur += scnprintf(cur, end - cur,

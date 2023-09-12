@@ -135,8 +135,8 @@ struct uvc_device {
 	unsigned int event_length;
 	unsigned int event_setup_out : 1;
 
-	bool wait_for_close;
-	struct completion unbind_ok;
+	struct delayed_work free_work;
+	int open_count;
 };
 
 static inline struct uvc_device *to_uvc(struct usb_function *f)
