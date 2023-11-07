@@ -51,8 +51,6 @@ static int dsi_display_enable_status (struct dsi_display *display, bool enable);
 static void dsi_display_is_probed(struct dsi_display *display,
 					int probe_status);
 
-static unsigned int cur_refresh_rate = 60;
-
 static void dsi_display_mask_ctrl_error_interrupts(struct dsi_display *display,
 			u32 mask, bool enable)
 {
@@ -5923,6 +5921,9 @@ int dsi_display_dev_probe(struct platform_device *pdev)
 	if ( display->is_dsi_mot_ext_enabled && index == DSI_PRIMARY ) {
 		dsi_display_ext_init(display);
 	}
+	if (index == DSI_PRIMARY) {
+		sde_sysfs_mot_kms_prop_util_init(display);
+	}
 	pr_info("dsi_display_dev_probe: display(%p), name: %s, is_dsi_mot_early_power_enabled=%d, is_dsi_mot_ext_enabled=%d\n",
 		display, (display->name==NULL)?"Null":display->name, display->is_dsi_mot_early_power_enabled, display->is_dsi_mot_ext_enabled);
 
@@ -5960,6 +5961,10 @@ int dsi_display_dev_remove(struct platform_device *pdev)
 				continue;
 			ctrl->ctrl->dma_cmd_workq = NULL;
 		}
+	}
+
+	if (display->display_idx == 0) {
+		sde_sysfs_mot_kms_prop_util_deinit(display);
 	}
 
 	(void)_dsi_display_dev_deinit(display);
@@ -8254,11 +8259,6 @@ bool dsi_display_is_panel_enable (int panel_index, int *probe_status,
 }
 EXPORT_SYMBOL(dsi_display_is_panel_enable);
 
-unsigned int dsi_panel_get_refresh_rate(void)
-{
-	return READ_ONCE(cur_refresh_rate);
-}
-
 int dsi_display_enable(struct dsi_display *display)
 {
 	int rc = 0;
@@ -8305,7 +8305,6 @@ int dsi_display_enable(struct dsi_display *display)
 	}
 
 	mode = display->panel->cur_mode;
-	WRITE_ONCE(cur_refresh_rate, mode->timing.refresh_rate);
 
 	if (mode->dsi_mode_flags & DSI_MODE_FLAG_DMS) {
 		rc = dsi_panel_post_switch(display->panel);
@@ -8336,7 +8335,6 @@ int dsi_display_enable(struct dsi_display *display)
 				display->name, rc);
 			goto error;
 		}
-		dsi_panel_reset_param(display->panel);
 	}
 
 	if (mode->dsi_mode_flags & DSI_MODE_FLAG_DMS) {

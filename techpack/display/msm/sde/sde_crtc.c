@@ -3665,6 +3665,8 @@ void sde_crtc_commit_kickoff(struct drm_crtc *crtc,
 	}
 	sde_crtc->play_count++;
 
+	sde_vbif_clear_errors(sde_kms);
+
 	if (is_error) {
 		_sde_crtc_remove_pipe_flush(crtc);
 		_sde_crtc_blend_setup(crtc, old_state, false);
@@ -4824,11 +4826,11 @@ static int sde_crtc_atomic_check(struct drm_crtc *crtc,
 {
 	struct drm_device *dev;
 	struct sde_crtc *sde_crtc;
-	struct plane_state pstates[SDE_PSTATES_MAX] __aligned(8);
+	struct plane_state *pstates = NULL;
 	struct sde_crtc_state *cstate;
 	struct drm_display_mode *mode;
 	int rc = 0;
-	struct sde_multirect_plane_states multirect_plane[SDE_MULTIRECT_PLANE_MAX] __aligned(8);
+	struct sde_multirect_plane_states *multirect_plane = NULL;
 	struct drm_connector *conn;
 	struct drm_connector_list_iter conn_iter;
 
@@ -4847,9 +4849,18 @@ static int sde_crtc_atomic_check(struct drm_crtc *crtc,
 		goto end;
 	}
 
-	memset(pstates, 0, sizeof(pstates));
-	memset(multirect_plane, 0, sizeof(multirect_plane));
-	
+	pstates = kcalloc(SDE_PSTATES_MAX,
+			sizeof(struct plane_state), GFP_KERNEL);
+
+	multirect_plane = kcalloc(SDE_MULTIRECT_PLANE_MAX,
+			sizeof(struct sde_multirect_plane_states),
+			GFP_KERNEL);
+
+	if (!pstates || !multirect_plane) {
+		rc = -ENOMEM;
+		goto end;
+	}
+
 	mode = &state->adjusted_mode;
 	SDE_DEBUG("%s: check", sde_crtc->name);
 
@@ -4905,6 +4916,8 @@ static int sde_crtc_atomic_check(struct drm_crtc *crtc,
 		goto end;
 	}
 end:
+	kfree(pstates);
+	kfree(multirect_plane);
 	return rc;
 }
 
@@ -5053,7 +5066,7 @@ static void sde_crtc_install_properties(struct drm_crtc *crtc,
 		return;
 	}
 
-	info = kzalloc(sizeof(struct sde_kms_info), GFP_KERNEL);
+	info = vzalloc(sizeof(struct sde_kms_info));
 	if (!info) {
 		SDE_ERROR("failed to allocate info memory\n");
 		return;
@@ -5300,12 +5313,12 @@ static void sde_crtc_install_properties(struct drm_crtc *crtc,
 				catalog->ubwc_bw_calc_version);
 
 	sde_kms_info_add_keyint(info, "use_baselayer_for_stage",
-			 catalog->has_base_layer);
+			catalog->has_base_layer);
 
 	msm_property_set_blob(&sde_crtc->property_info, &sde_crtc->blob_info,
 			info->data, SDE_KMS_INFO_DATALEN(info), CRTC_PROP_INFO);
 
-	kfree(info);
+	vfree(info);
 }
 
 static int _sde_crtc_get_output_fence(struct drm_crtc *crtc,

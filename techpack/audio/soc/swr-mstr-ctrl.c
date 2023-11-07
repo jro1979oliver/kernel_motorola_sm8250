@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2015-2021, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/irq.h>
@@ -1108,14 +1109,14 @@ static void swrm_switch_frame_shape(struct swr_mstr_ctrl *swrm, int mclk_freq)
 }
 
 static struct swr_port_info *swrm_get_port_req(struct swrm_mports *mport,
-						   u8 slv_port, u8 dev_num)
+						   u8 slv_port, u8 dev_num, u64 dev_addr)
 {
 	struct swr_port_info *port_req = NULL;
 
 	list_for_each_entry(port_req, &mport->port_req_list, list) {
 	/* Store dev_id instead of dev_num if enumeration is changed run_time */
 		if ((port_req->slave_port_id == slv_port)
-			&& (port_req->dev_num == dev_num))
+			&& ((port_req->dev_num == dev_num) || (port_req->dev_addr == dev_addr)))
 			return port_req;
 	}
 	return NULL;
@@ -1641,7 +1642,7 @@ static int swrm_connect_port(struct swr_master *master,
 		mport = &(swrm->mport_cfg[mstr_port_id]);
 		/* get port req */
 		port_req = swrm_get_port_req(mport, portinfo->port_id[i],
-					portinfo->dev_num);
+					portinfo->dev_num, portinfo->dev_addr);
 		if (!port_req) {
 			dev_dbg(&master->dev, "%s: new req:port id %d dev %d\n",
 						 __func__, portinfo->port_id[i],
@@ -1653,6 +1654,7 @@ static int swrm_connect_port(struct swr_master *master,
 				goto mem_fail;
 			}
 			port_req->dev_num = portinfo->dev_num;
+			port_req->dev_addr = portinfo->dev_addr;
 			port_req->slave_port_id = portinfo->port_id[i];
 			port_req->num_ch = portinfo->num_ch[i];
 			port_req->ch_rate = portinfo->ch_rate[i];
@@ -1729,7 +1731,7 @@ static int swrm_disconnect_port(struct swr_master *master,
 		mport = &(swrm->mport_cfg[mstr_port_id]);
 		/* get port req */
 		port_req = swrm_get_port_req(mport, portinfo->port_id[i],
-					portinfo->dev_num);
+					portinfo->dev_num, portinfo->dev_addr);
 
 		if (!port_req) {
 			dev_err(&master->dev, "%s:port not enabled : port %d\n",
@@ -3168,6 +3170,7 @@ static int swrm_runtime_suspend(struct device *dev)
 	struct swr_master *mstr = &swrm->master;
 	struct swr_device *swr_dev;
 	int current_state = 0;
+	struct irq_data *irq_data = NULL;
 
 	trace_printk("%s: pm_runtime: suspend state: %d\n",
 		__func__, swrm->state);
@@ -3276,7 +3279,9 @@ static int swrm_runtime_suspend(struct device *dev)
 
 		if (swrm->clk_stop_mode0_supp) {
 			if (swrm->wake_irq > 0) {
-				enable_irq(swrm->wake_irq);
+				irq_data = irq_get_irq_data(swrm->wake_irq);
+				if (irq_data && irqd_irq_disabled(irq_data))
+					enable_irq(swrm->wake_irq);
 			} else if (swrm->ipc_wakeup) {
 				msm_aud_evt_blocking_notifier_call_chain(
 					SWR_WAKE_IRQ_REGISTER, (void *)swrm);

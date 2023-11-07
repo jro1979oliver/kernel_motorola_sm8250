@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2016-2021, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/delay.h>
@@ -70,7 +71,7 @@ static u32 dsi_dsc_rc_buf_thresh[] = {0x0e, 0x1c, 0x2a, 0x38, 0x46, 0x54,
  * Rate control - Min QP values for each ratio type in dsi_dsc_ratio_type
  */
 static char dsi_dsc_rc_range_min_qp_1_1[][15] = {
-	{0, 0, 1, 1, 3, 3, 3, 3, 3, 3, 5, 5, 5, 7, 12},
+	{0, 0, 1, 1, 3, 3, 3, 3, 3, 3, 5, 5, 5, 7, 13},
 	{0, 4, 5, 5, 7, 7, 7, 7, 7, 7, 9, 9, 9, 11, 17},
 	{0, 4, 9, 9, 11, 11, 11, 11, 11, 11, 13, 13, 13, 15, 21},
 	{0, 4, 5, 6, 7, 7, 7, 7, 7, 7, 9, 9, 9, 11, 15},
@@ -873,7 +874,7 @@ error:
 	return rc;
 }
 
-static bool dsi_panel_param_is_supported(u32 param_idx)
+bool dsi_panel_param_is_supported(u32 param_idx)
 {
 
 	struct panel_param *param = NULL;
@@ -1044,6 +1045,11 @@ static int dsi_panel_send_param_cmd(struct dsi_panel *panel,
 
 	mutex_lock(&panel->panel_lock);
 
+	if (!panel->panel_initialized) {
+		rc = -ENODEV;
+		goto end;
+	}
+
 	if (param_info->value >= panel_param->val_max)
 		param_info->value = panel_param->val_max - 1;
 
@@ -1210,18 +1216,6 @@ int dsi_panel_set_param(struct dsi_panel *panel,
 	}
 
 	return rc;
-}
-
-void dsi_panel_reset_param(struct dsi_panel *panel)
-{
-	struct panel_param *param;
-	int i;
-
-	for (i = 0; i < PARAM_ID_NUM; i++) {
-		/* Since only panel support for now */
-		param = &dsi_panel_param[0][i];
-		param->value = param->default_value;
-	}
 }
 
 static int dsi_panel_bl_register(struct dsi_panel *panel)
