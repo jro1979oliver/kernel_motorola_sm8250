@@ -13,6 +13,10 @@ ifeq ($(KERNEL_BUILD), 1)
 	AUDIO_ROOT := $(AUDIO_BLD_DIR)/techpack/audio
 endif
 
+ifeq ($(AUDIO_FEATURE_ENABLED_CIRRUS_PLAYBACK),true)
+	EXTRA_CFLAGS += -I$(TOP)/vendor/cirrus/audio/dlkm/include
+endif
+
 ifeq ($(KERNEL_BUILD), 0)
 	ifeq ($(CONFIG_ARCH_SM6150), y)
 		include $(AUDIO_ROOT)/config/sm6150auto.conf
@@ -62,21 +66,6 @@ ifeq ($(KERNEL_BUILD), 0)
 		include $(AUDIO_ROOT)/config/sdm660auto.conf
 		export
 		INCS    +=  -include $(AUDIO_ROOT)/config/sdm660autoconf.h
-	endif
-	ifeq ($(CONFIG_ARCH_SDM450), y)
-		include $(AUDIO_ROOT)/config/sdm450auto.conf
-		export
-		INCS    +=  -include $(AUDIO_ROOT)/config/sdm450autoconf.h
-	endif
-	ifeq ($(CONFIG_ARCH_SDM439), y)
-		include $(AUDIO_ROOT)/config/sdm450auto.conf
-		export
-		INCS    +=  -include $(AUDIO_ROOT)/config/sdm450autoconf.h
-	endif
-	ifeq ($(CONFIG_ARCH_MSM8917), y)
-		include $(AUDIO_ROOT)/config/sdm450auto.conf
-		export
-		INCS    +=  -include $(AUDIO_ROOT)/config/sdm450autoconf.h
 	endif
 endif
 

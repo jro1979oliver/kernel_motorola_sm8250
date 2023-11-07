@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2012-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2023 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2012-2020, The Linux Foundation. All rights reserved.
  */
 #include <linux/module.h>
 #include <linux/slab.h>
@@ -1551,7 +1550,7 @@ static int32_t adm_callback(struct apr_client_data *data, void *priv)
 {
 	uint32_t *payload;
 	int port_idx, copp_idx, idx, client_id;
-	uint32_t num_modules;
+	int num_modules;
 	int ret;
 
 	if (data == NULL) {
@@ -4632,6 +4631,50 @@ int adm_set_ffecns_freeze_event(bool ffecns_freeze_event)
 	return rc;
 }
 EXPORT_SYMBOL(adm_set_ffecns_freeze_event);
+
+#ifdef CONFIG_SND_SOC_AWINIC_AW882XX
+int aw_adm_param_enable(int port_id, int module_id,  int param_id, int enable)
+{
+        int copp_idx = 0;
+        uint32_t enable_param;
+        struct param_hdr_v3 param_hdr;
+        int rc = 0;
+
+        pr_debug("%s port_id %d, module_id 0x%x, enable %d\n",
+                __func__, port_id, module_id, enable);
+
+        copp_idx = adm_get_default_copp_idx(port_id);
+
+        if (copp_idx < 0 || copp_idx >= MAX_COPPS_PER_PORT) {
+                pr_err("%s: Invalid copp_num: %d\n", __func__, copp_idx);
+                return -EINVAL;
+        }
+
+        if (enable < 0 || enable > 1) {
+                pr_err("%s: Invalid value for enable %d\n", __func__, enable);
+                return -EINVAL;
+        }
+
+        pr_debug("%s port_id %d, module_id 0x%x, copp_idx 0x%x, enable %d\n",
+                __func__, port_id, module_id, copp_idx, enable);
+
+        memset(&param_hdr, 0, sizeof(param_hdr));
+        param_hdr.module_id = module_id;
+        param_hdr.instance_id = INSTANCE_ID_0;
+        param_hdr.param_id = param_id;
+        param_hdr.param_size = sizeof(enable_param);
+        enable_param = enable;
+
+        rc = adm_pack_and_set_one_pp_param(port_id, copp_idx, param_hdr,
+                                                (uint8_t *) &enable_param);
+
+        if (rc)
+                pr_err("%s: Failed to set enable of module(%d) instance(%d) to %d, err %d\n",
+                                __func__, module_id, INSTANCE_ID_0, enable, rc);
+        return rc;
+}
+EXPORT_SYMBOL(aw_adm_param_enable);
+#endif
 
 /**
  * adm_param_enable -
