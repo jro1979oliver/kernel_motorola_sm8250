@@ -304,6 +304,7 @@ int swap_readpage(struct page *page, bool synchronous)
 	blk_qc_t qc;
 	struct gendisk *disk;
 	unsigned long pflags;
+	swp_entry_t entry;
 
 	VM_BUG_ON_PAGE(!PageSwapCache(page) && !synchronous, page);
 	VM_BUG_ON_PAGE(!PageLocked(page), page);

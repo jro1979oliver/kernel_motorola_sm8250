@@ -1708,7 +1708,6 @@ static void ncm_free_inst(struct usb_function_instance *f)
 static struct usb_function_instance *ncm_alloc_inst(void)
 {
 	struct f_ncm_opts *opts;
-
 	/* Begin MOTODESK-2239 Add OS descriptor support. suzh1 2021-02-05 */
 	struct usb_os_desc *descs[1];
 	char *names[1];

@@ -1464,7 +1464,7 @@ static void geni_spi_handle_rx(struct spi_geni_master *mas)
 	int rx_wc = 0;
 	u8 *rx_buf = NULL;
 
-	if (!mas->cur_xfer)
+	if ((!mas->cur_xfer) || !(mas->cur_xfer->rx_buf))
 		return;
 
 	rx_buf = mas->cur_xfer->rx_buf;
@@ -1867,12 +1867,17 @@ static int spi_geni_suspend(struct device *dev)
 	struct spi_master *spi = get_spi_master(dev);
 	struct spi_geni_master *geni_mas = spi_master_get_devdata(spi);
 
+#if 0
 	if (!pm_runtime_status_suspended(dev)) {
 		GENI_SE_ERR(geni_mas->ipc, true, dev,
 			":%s: runtime PM is active\n", __func__);
 		ret = -EBUSY;
 		return ret;
 	}
+#else
+	if (!pm_runtime_status_suspended(dev))
+		ret = -EBUSY;
+#endif
 
 	GENI_SE_ERR(geni_mas->ipc, true, dev, ":%s: End\n", __func__);
 	return ret;

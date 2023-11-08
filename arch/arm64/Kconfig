@@ -1137,6 +1137,15 @@ config ARM64_SSBD
 
 	  If unsure, say Y.
 
+config MITIGATE_SPECTRE_BRANCH_HISTORY
+	bool "Mitigate Spectre style attacks against branch history" if EXPERT
+	default y
+	help
+	  Speculation attacks against some high-performance processors can
+	  make use of branch history to influence future speculation.
+	  When taking an exception from user-space, a sequence of branches
+	  or a firmware call overwrites the branch history.
+
 config PRINT_VMEMLAYOUT
 	bool "Enable debug option to print kernel virtual memory layout"
 	help
@@ -1696,3 +1705,9 @@ source "arch/arm64/kvm/Kconfig"
 if CRYPTO
 source "arch/arm64/crypto/Kconfig"
 endif
+
+config AF_NOISE_ELIMINATION
+	bool "For elimnating AF resonance noise"
+	default n
+	help
+	Enable it only for produts that suffering AF resonance noise.
