@@ -27,9 +27,3 @@
 	utags: utags { };
 	hw: hw { };
 };
-
-&firmware {
-	android {
-		/delete-node/ fstab;
-	};
-};
