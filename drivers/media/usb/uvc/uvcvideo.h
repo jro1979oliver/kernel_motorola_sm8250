@@ -195,6 +195,7 @@
 #define UVC_QUIRK_RESTRICT_FRAME_RATE	0x00000200
 #define UVC_QUIRK_RESTORE_CTRLS_ON_INIT	0x00000400
 #define UVC_QUIRK_FORCE_Y8		0x00000800
+#define UVC_QUIRK_OVERRIDE_TIMESTAMPS   0x00001000
 
 /* Format flags */
 #define UVC_FMT_FLAG_COMPRESSED		0x00000001
@@ -535,9 +536,9 @@ struct uvc_streaming {
 		u32 max_payload_size;
 	} bulk;
 
-	struct urb **urb;
-	char **urb_buffer;
-	dma_addr_t *urb_dma;
+	struct urb *urb[UVC_URBS];
+	char *urb_buffer[UVC_URBS];
+	dma_addr_t urb_dma[UVC_URBS];
 	unsigned int urb_size;
 
 	u32 sequence;
@@ -570,15 +571,6 @@ struct uvc_streaming {
 
 		spinlock_t lock;
 	} clock;
-
-	/* Maximum number of URBs that can be submitted */
-	u32 max_urb;
-
-	/* Maximum number of packets per URB */
-	u32 max_urb_packets;
-
-	/*set if stream in progress */
-	u8 refcnt;
 };
 
 struct uvc_device {

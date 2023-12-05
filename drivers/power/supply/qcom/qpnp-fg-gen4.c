@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2018-2020 The Linux Foundation. All rights reserved.
- * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #define pr_fmt(fmt)	"FG: %s: " fmt, __func__
@@ -31,12 +30,11 @@
 #define FG_MEM_IF_PM8150B		0x0D
 #define FG_ADC_RR_PM8150B		0x13
 
+#define SDAM_COOKIE_OFFSET		0x80
 #define SDAM_CYCLE_COUNT_OFFSET		0x81
 #define SDAM_CAP_LEARN_OFFSET		0x91
+#define SDAM_COOKIE			0xA5
 #define SDAM_FG_PARAM_LENGTH		20
-
-#define SDAM_COOKIE_OFFSET_4BYTE	0x95
-#define SDAM_COOKIE_4BYTE		0x12345678
 
 #define FG_SRAM_LEN			972
 #define PROFILE_LEN			416
@@ -323,6 +321,7 @@ struct fg_gen4_chip {
 	bool			vbatt_low;
 	bool			chg_term_good;
 	bool			soc_scale_mode;
+	bool			loading_profile;
 };
 
 struct bias_config {
@@ -988,6 +987,7 @@ static int fg_gen4_get_prop_capacity(struct fg_dev *fg, int *val)
 	}
 
 	if (chip->vbatt_low) {
+		pr_err("FG Blocked SOC; vbatt_low\n");
 		*val = EMPTY_SOC;
 		return 0;
 	}
@@ -1304,7 +1304,7 @@ static int fg_gen4_store_learned_capacity(void *data, int64_t learned_cap_uah)
 	struct fg_dev *fg;
 	int16_t cc_mah;
 	int rc;
-	u32 cookie_4byte = SDAM_COOKIE_4BYTE;
+	u8 cookie = SDAM_COOKIE;
 
 	if (!chip)
 		return -ENODEV;
@@ -1331,15 +1331,15 @@ static int fg_gen4_store_learned_capacity(void *data, int64_t learned_cap_uah)
 			return rc;
 		}
 
-		rc = nvmem_device_write(chip->fg_nvmem,
-			SDAM_COOKIE_OFFSET_4BYTE, 1, &cookie_4byte);
+		rc = nvmem_device_write(chip->fg_nvmem, SDAM_COOKIE_OFFSET, 1,
+					&cookie);
 		if (rc < 0) {
 			pr_err("Error in writing cookie to SDAM, rc=%d\n", rc);
 			return rc;
 		}
 	}
 
-	fg_dbg(fg, FG_CAP_LEARN, "learned capacity %llduah/%dmah stored\n",
+	pr_info("Learned capacity %llduah/%dmah stored\n",
 		chip->cl->learned_cap_uah, cc_mah);
 	return 0;
 }
@@ -2379,17 +2379,17 @@ static bool is_sdam_cookie_set(struct fg_gen4_chip *chip)
 {
 	struct fg_dev *fg = &chip->fg;
 	int rc;
-	u32 cookie_4byte;
+	u8 cookie;
 
-	rc = nvmem_device_read(chip->fg_nvmem, SDAM_COOKIE_OFFSET_4BYTE, 4,
-			&cookie_4byte);
+	rc = nvmem_device_read(chip->fg_nvmem, SDAM_COOKIE_OFFSET, 1,
+				&cookie);
 	if (rc < 0) {
 		pr_err("Error in reading SDAM_COOKIE rc=%d\n", rc);
 		return false;
 	}
 
-	fg_dbg(fg, FG_STATUS, "cookie_4byte: %08x\n", cookie_4byte);
-	return (cookie_4byte == SDAM_COOKIE_4BYTE);
+	fg_dbg(fg, FG_STATUS, "cookie: %x\n", cookie);
+	return (cookie == SDAM_COOKIE);
 }
 
 static void fg_gen4_clear_sdam(struct fg_gen4_chip *chip)
@@ -2413,9 +2413,8 @@ static void fg_gen4_clear_sdam(struct fg_gen4_chip *chip)
 static void fg_gen4_post_profile_load(struct fg_gen4_chip *chip)
 {
 	struct fg_dev *fg = &chip->fg;
-	int rc = 0, act_cap_mah;
+	int rc, act_cap_mah;
 	u8 buf[16] = {0};
-	u32 cookie_4byte = 0;
 
 	if (chip->dt.multi_profile_load &&
 		chip->batt_age_level != chip->last_batt_age_level) {
@@ -2469,13 +2468,6 @@ static void fg_gen4_post_profile_load(struct fg_gen4_chip *chip)
 				pr_err("Error in writing learned capacity to SDAM, rc=%d\n",
 					rc);
 		}
-
-		/* Set the COOKIE to prevent rechecking the SRAM again */
-		cookie_4byte = SDAM_COOKIE_4BYTE;
-		rc = nvmem_device_write(chip->fg_nvmem,
-			SDAM_COOKIE_OFFSET_4BYTE, 4, (u8 *)&cookie_4byte);
-		if (rc < 0)
-			pr_err("Failed to set SDAM cookie, rc=%d\n", rc);
 	}
 
 	/* Restore the cycle counters so that it would be valid at this point */
@@ -2526,16 +2518,7 @@ static void profile_load_work(struct work_struct *work)
 
 	fg_dbg(fg, FG_STATUS, "profile loading started\n");
 
-	if (chip->dt.multi_profile_load &&
-		chip->batt_age_level != chip->last_batt_age_level) {
-		rc = fg_gen4_get_learned_capacity(chip, &learned_cap_uah);
-		if (rc < 0)
-			pr_err("Error in getting learned capacity rc=%d\n", rc);
-		else
-			fg_dbg(fg, FG_STATUS, "learned capacity: %lld uAh\n",
-				learned_cap_uah);
-	}
-
+	chip->loading_profile = true;
 	rc = qpnp_fg_gen4_load_profile(chip);
 	if (rc < 0)
 		goto out;
@@ -2594,6 +2577,7 @@ done:
 	fg_notify_charger(fg);
 
 	schedule_delayed_work(&chip->ttf->ttf_work, msecs_to_jiffies(10000));
+	chip->loading_profile = false;
 	fg_dbg(fg, FG_STATUS, "profile loaded successfully");
 out:
 	if (!chip->esr_fast_calib || is_debug_batt_id(fg)) {
@@ -3525,6 +3509,11 @@ static irqreturn_t fg_vbatt_low_irq_handler(int irq, void *data)
 	int rc, vbatt_mv, msoc_raw;
 	s64 time_us;
 
+	if (chip->loading_profile) {
+		pr_err("Blocked vbatt Low During Profile Load!\n");
+		return IRQ_HANDLED;
+	}
+
 	rc = fg_get_battery_voltage(fg, &vbatt_mv);
 	if (rc < 0)
 		return IRQ_HANDLED;
@@ -3534,8 +3523,8 @@ static irqreturn_t fg_vbatt_low_irq_handler(int irq, void *data)
 	if (rc < 0)
 		return IRQ_HANDLED;
 
-	fg_dbg(fg, FG_IRQ, "irq %d triggered vbatt_mv: %d msoc_raw:%d\n", irq,
-		vbatt_mv, msoc_raw);
+	pr_err("FG: %s irq %d triggered vbatt_mv: %d msoc_raw:%d cutoff: %d\n",
+		       __func__, irq, vbatt_mv, msoc_raw, chip->dt.cutoff_volt_mv);
 
 	if (!fg->soc_reporting_ready) {
 		fg_dbg(fg, FG_IRQ, "SOC reporting is not ready\n");
@@ -4618,6 +4607,9 @@ static int fg_psy_get_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_CALIBRATE:
 		pval->intval = chip->calib_level;
 		break;
+	case POWER_SUPPLY_PROP_BATT_FULL_CURRENT:
+		pval->intval = chip->dt.sys_term_curr_ma;
+		break;
 	default:
 		pr_err("unsupported property %d\n", psp);
 		rc = -EINVAL;
@@ -4627,6 +4619,24 @@ static int fg_psy_get_property(struct power_supply *psy,
 	if (rc < 0)
 		return -ENODATA;
 
+	return 0;
+}
+
+static int mmi_fg_set_qg_iterm(struct fg_gen4_chip *chip )
+{
+	struct fg_dev *fg = &chip->fg;
+	u8 buf[4];
+	int rc;
+
+	fg_encode(fg->sp, FG_SRAM_SYS_TERM_CURR, chip->dt.sys_term_curr_ma,
+		buf);
+	rc = fg_sram_write(fg, fg->sp[FG_SRAM_SYS_TERM_CURR].addr_word,
+			fg->sp[FG_SRAM_SYS_TERM_CURR].addr_byte, buf,
+			fg->sp[FG_SRAM_SYS_TERM_CURR].len, FG_IMA_DEFAULT);
+	if (rc < 0) {
+		pr_err("Error in writing sys_term_curr, rc=%d\n", rc);
+		return rc;
+	}
 	return 0;
 }
 
@@ -4712,6 +4722,12 @@ static int fg_psy_set_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_CALIBRATE:
 		rc = fg_gen4_set_calibrate_level(chip, pval->intval);
 		break;
+	case POWER_SUPPLY_PROP_BATT_FULL_CURRENT:
+		chip->dt.sys_term_curr_ma = pval->intval;
+		fg_dbg(fg, FG_STATUS, "set bat full current =%d\n",
+			chip->dt.sys_term_curr_ma);
+		mmi_fg_set_qg_iterm(chip);
+		break;
 	default:
 		break;
 	}
@@ -4732,6 +4748,7 @@ static int fg_property_is_writeable(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_CLEAR_SOH:
 	case POWER_SUPPLY_PROP_BATT_AGE_LEVEL:
 	case POWER_SUPPLY_PROP_CALIBRATE:
+	case POWER_SUPPLY_PROP_BATT_FULL_CURRENT:
 		return 1;
 	default:
 		break;
@@ -4779,6 +4796,7 @@ static enum power_supply_property fg_psy_props[] = {
 	POWER_SUPPLY_PROP_POWER_AVG,
 	POWER_SUPPLY_PROP_SCALE_MODE_EN,
 	POWER_SUPPLY_PROP_CALIBRATE,
+	POWER_SUPPLY_PROP_BATT_FULL_CURRENT,
 };
 
 static const struct power_supply_desc fg_psy_desc = {

@@ -472,6 +472,7 @@ struct fastrpc_file {
 	struct mutex perf_mutex;
 	struct pm_qos_request pm_qos_req;
 	int qos_request;
+	struct mutex pm_qos_mutex;
 	struct mutex map_mutex;
 	struct mutex internal_map_mutex;
 	/* Identifies the device (MINOR_NUM_DEV / MINOR_NUM_SECURE_DEV) */
@@ -484,7 +485,6 @@ struct fastrpc_file {
 	int debug_buf_alloced_attempted;
 	/* Flag to indicate dynamic process creation status*/
 	bool in_process_create;
-	struct completion shutdown;
 };
 
 static struct fastrpc_apps gfa;
@@ -1190,6 +1190,11 @@ static int fastrpc_buf_alloc(struct fastrpc_file *fl, size_t size,
 		goto bail;
 	}
 
+	VERIFY(err, fl->sctx != NULL);
+	if (err) {
+		err = -EBADR;
+		goto bail;
+	}
 	VERIFY(err, size > 0 && size < me->max_size_limit);
 	if (err) {
 		err = -EFAULT;
@@ -1466,11 +1471,8 @@ static int context_alloc(struct fastrpc_file *fl, uint32_t kernel,
 
 	spin_lock(&fl->hlock);
 	hlist_add_head(&ctx->hn, &clst->pending);
-	if (!(fl->cid >= ADSP_DOMAIN_ID && fl->cid < NUM_CHANNELS)) {
-		err = -ECHRNG;
-		goto bail;
-	}
-	cid = fl->cid;
+	cid = (fl->cid >= ADSP_DOMAIN_ID && fl->cid < NUM_CHANNELS)
+			? fl->cid : 0;
 	chan = &me->channel[cid];
 	spin_unlock(&fl->hlock);
 
@@ -3035,10 +3037,8 @@ static int fastrpc_release_current_dsp_process(struct fastrpc_file *fl)
 	if (err)
 		goto bail;
 	VERIFY(err, fl->apps->channel[cid].issubsystemup == 1);
-	if (err) {
-		wait_for_completion(&fl->shutdown);
+	if (err)
 		goto bail;
-	}
 	tgid = fl->tgid;
 	ra[0].buf.pv = (void *)&tgid;
 	ra[0].buf.len = sizeof(tgid);
@@ -3094,7 +3094,7 @@ bail:
 
 static int fastrpc_mmap_on_dsp(struct fastrpc_file *fl, uint32_t flags,
 					uintptr_t va, uint64_t phys,
-					size_t size, int refs, uintptr_t *raddr)
+					size_t size, uintptr_t *raddr)
 {
 	struct fastrpc_ioctl_invoke_crc ioctl;
 	struct fastrpc_apps *me = &gfa;
@@ -3156,7 +3156,7 @@ static int fastrpc_mmap_on_dsp(struct fastrpc_file *fl, uint32_t flags,
 		}
 	}
 	if (flags == ADSP_MMAP_REMOTE_HEAP_ADDR
-				&& me->channel[cid].rhvm.vmid && refs == 1) {
+				&& me->channel[cid].rhvm.vmid) {
 		err = hyp_assign_phys(phys, (uint64_t)size,
 				hlosvm, 1, me->channel[cid].rhvm.vmid,
 				me->channel[cid].rhvm.vmperm,
@@ -3481,6 +3481,7 @@ static int fastrpc_internal_munmap_fd(struct fastrpc_file *fl,
 			(unsigned int)ud->len);
 		err = -1;
 		mutex_unlock(&fl->map_mutex);
+		mutex_unlock(&fl->internal_map_mutex);
 		goto bail;
 	}
 	if (map && (map->attr & FASTRPC_ATTR_KEEP_MAP)) {
@@ -3488,6 +3489,7 @@ static int fastrpc_internal_munmap_fd(struct fastrpc_file *fl,
 		fastrpc_mmap_free(map, 0);
 	}
 	mutex_unlock(&fl->map_mutex);
+	mutex_unlock(&fl->internal_map_mutex);
 bail:
 	mutex_unlock(&fl->internal_map_mutex);
 	return err;
@@ -3530,7 +3532,7 @@ static int fastrpc_internal_mmap(struct fastrpc_file *fl,
 		if (err)
 			goto bail;
 		err = fastrpc_mmap_on_dsp(fl, ud->flags, 0,
-				rbuf->phys, rbuf->size, 0, &raddr);
+				rbuf->phys, rbuf->size, &raddr);
 		if (err)
 			goto bail;
 		rbuf->raddr = raddr;
@@ -3551,7 +3553,7 @@ static int fastrpc_internal_mmap(struct fastrpc_file *fl,
 		else
 			va_to_dsp = (uintptr_t)map->va;
 		VERIFY(err, 0 == fastrpc_mmap_on_dsp(fl, ud->flags, va_to_dsp,
-				map->phys, map->size, map->refs, &raddr));
+				map->phys, map->size, &raddr));
 		if (err)
 			goto bail;
 		map->raddr = raddr;
@@ -3850,6 +3852,7 @@ static int fastrpc_file_free(struct fastrpc_file *fl)
 	mutex_unlock(&fl->perf_mutex);
 	mutex_destroy(&fl->perf_mutex);
 	mutex_destroy(&fl->map_mutex);
+	mutex_destroy(&fl->pm_qos_mutex);
 	mutex_destroy(&fl->internal_map_mutex);
 	kfree(fl);
 	return 0;
@@ -4224,7 +4227,7 @@ static int fastrpc_device_open(struct inode *inode, struct file *filp)
 	hlist_add_head(&fl->hn, &me->drivers);
 	spin_unlock(&me->hlock);
 	mutex_init(&fl->perf_mutex);
-	init_completion(&fl->shutdown);
+	mutex_init(&fl->pm_qos_mutex);
 	return 0;
 }
 
@@ -4351,12 +4354,14 @@ static int fastrpc_internal_control(struct fastrpc_file *fl,
 		fl->pm_qos_req.type = PM_QOS_REQ_AFFINE_CORES;
 		cpumask_copy(&fl->pm_qos_req.cpus_affine, &mask);
 
+		mutex_lock(&fl->pm_qos_mutex);
 		if (!fl->qos_request) {
 			pm_qos_add_request(&fl->pm_qos_req,
 				PM_QOS_CPU_DMA_LATENCY, latency);
 			fl->qos_request = 1;
 		} else
 			pm_qos_update_request(&fl->pm_qos_req, latency);
+		mutex_unlock(&fl->pm_qos_mutex);
 
 		/* Ensure CPU feature map updated to DSP for early WakeUp */
 		fastrpc_send_cpuinfo_to_dsp(fl);
@@ -4736,8 +4741,6 @@ static int fastrpc_restart_notifier_cb(struct notifier_block *nb,
 {
 	struct fastrpc_apps *me = &gfa;
 	struct fastrpc_channel_ctx *ctx;
-	struct fastrpc_file *fl;
-	struct hlist_node *n;
 	struct notif_data *notifdata = (struct notif_data *)data;
 	int cid = -1;
 
@@ -4750,16 +4753,6 @@ static int fastrpc_restart_notifier_cb(struct notifier_block *nb,
 		ctx->ssrcount++;
 		ctx->issubsystemup = 0;
 		mutex_unlock(&me->channel[cid].smd_mutex);
-	} else if (code == SUBSYS_AFTER_SHUTDOWN) {
-		pr_info("adsprpc: %s: %s subsystem is down\n",
-			__func__, gcinfo[cid].subsys);
-		spin_lock(&me->hlock);
-		hlist_for_each_entry_safe(fl, n, &me->drivers, hn) {
-			if (fl->cid != cid)
-				continue;
-			complete(&fl->shutdown);
-		}
-		spin_unlock(&me->hlock);
 	} else if (code == SUBSYS_RAMDUMP_NOTIFICATION) {
 		if (cid == RH_CID) {
 			if (me->ramdump_handle)

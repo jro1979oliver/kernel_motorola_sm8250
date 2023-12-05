@@ -805,6 +805,17 @@ static void uvc_video_stats_decode(struct uvc_streaming *stream,
 		return;
 	}
 
+        /*  BEGIN IKSWR-85387  Lenovo liangsk2, 2021/05/21  If device is ThinkReality A3,
+         *  check for invalid headers.  if the data[0] is not equal to header_size, will
+         *  get the wrong pts.
+         */
+        if ((len < header_size || data[0] < header_size || data[0] != header_size) &&
+	    (stream->dev->quirks & UVC_QUIRK_OVERRIDE_TIMESTAMPS)) {
+                stream->stats.frame.nb_invalid++;
+                return;
+        }
+	//  END IKSWR-85387
+
 	/* Extract the timestamps. */
 	if (has_pts)
 		pts = get_unaligned_le32(&data[2]);
@@ -1072,6 +1083,16 @@ static int uvc_video_decode_start(struct uvc_streaming *stream,
 		buf->buf.field = V4L2_FIELD_NONE;
 		buf->buf.sequence = stream->sequence;
 		buf->buf.vb2_buf.timestamp = ktime_to_ns(uvc_video_get_time());
+		/*  BEGIN IKSWR-62149  Lenovo chengyk3, 2021/03/25 Match the frame
+		 *  timestamp and 6dof timestamp.If device if ThinkReality A3,overwirte
+		 *  the current time as the device-side pts
+		 */
+		if (stream->stats.frame.pts != 0 &&
+				(stream->dev->quirks & UVC_QUIRK_OVERRIDE_TIMESTAMPS)) {
+			buf->buf.vb2_buf.glass_timestamp =
+				stream->stats.frame.pts;
+		}
+		//  END IKSWR-62149
 
 		/* TODO: Handle PTS and SCR. */
 		buf->state = UVC_BUF_STATE_ACTIVE;
@@ -1515,7 +1536,7 @@ static void uvc_free_urb_buffers(struct uvc_streaming *stream)
 {
 	unsigned int i;
 
-	for (i = 0; i < stream->max_urb; ++i) {
+	for (i = 0; i < UVC_URBS; ++i) {
 		if (stream->urb_buffer[i]) {
 #ifndef CONFIG_DMA_NONCOHERENT
 			usb_free_coherent(stream->dev->udev, stream->urb_size,
@@ -1555,22 +1576,12 @@ static int uvc_alloc_urb_buffers(struct uvc_streaming *stream,
 	 * payloads across multiple URBs.
 	 */
 	npackets = DIV_ROUND_UP(size, psize);
-	if (npackets > stream->max_urb_packets)
-		npackets = stream->max_urb_packets;
-
-
-	/* Allocate memory for storing URB pointers */
-	stream->urb = kcalloc(stream->max_urb,
-			sizeof(struct urb *), gfp_flags | __GFP_NOWARN);
-	stream->urb_buffer = kcalloc(stream->max_urb,
-			sizeof(char *), gfp_flags | __GFP_NOWARN);
-	stream->urb_dma = kcalloc(stream->max_urb,
-			sizeof(dma_addr_t), gfp_flags | __GFP_NOWARN);
-
+	if (npackets > UVC_MAX_PACKETS)
+		npackets = UVC_MAX_PACKETS;
 
 	/* Retry allocations until one succeed. */
 	for (; npackets > 1; npackets /= 2) {
-		for (i = 0; i < stream->max_urb; ++i) {
+		for (i = 0; i < UVC_URBS; ++i) {
 			stream->urb_size = psize * npackets;
 #ifndef CONFIG_DMA_NONCOHERENT
 			stream->urb_buffer[i] = usb_alloc_coherent(
@@ -1586,10 +1597,10 @@ static int uvc_alloc_urb_buffers(struct uvc_streaming *stream,
 			}
 		}
 
-		if (i == stream->max_urb) {
-			uvc_trace(UVC_TRACE_VIDEO,
-				"Allocated %u URB buffers of %ux%u bytes each.\n",
-				stream->max_urb, npackets, psize);
+		if (i == UVC_URBS) {
+			uvc_trace(UVC_TRACE_VIDEO, "Allocated %u URB buffers "
+				"of %ux%u bytes each.\n", UVC_URBS, npackets,
+				psize);
 			return npackets;
 		}
 	}
@@ -1609,7 +1620,7 @@ static void uvc_uninit_video(struct uvc_streaming *stream, int free_buffers)
 
 	uvc_video_stats_stop(stream);
 
-	for (i = 0; i < stream->max_urb; ++i) {
+	for (i = 0; i < UVC_URBS; ++i) {
 		urb = stream->urb[i];
 		if (urb == NULL)
 			continue;
@@ -1621,8 +1632,6 @@ static void uvc_uninit_video(struct uvc_streaming *stream, int free_buffers)
 
 	if (free_buffers)
 		uvc_free_urb_buffers(stream);
-
-	stream->refcnt--;
 }
 
 /*
@@ -1672,7 +1681,7 @@ static int uvc_init_video_isoc(struct uvc_streaming *stream,
 
 	size = npackets * psize;
 
-	for (i = 0; i < stream->max_urb; ++i) {
+	for (i = 0; i < UVC_URBS; ++i) {
 		urb = usb_alloc_urb(npackets, gfp_flags);
 		if (urb == NULL) {
 			uvc_uninit_video(stream, 1);
@@ -1738,7 +1747,7 @@ static int uvc_init_video_bulk(struct uvc_streaming *stream,
 	if (stream->type == V4L2_BUF_TYPE_VIDEO_OUTPUT)
 		size = 0;
 
-	for (i = 0; i < stream->max_urb; ++i) {
+	for (i = 0; i < UVC_URBS; ++i) {
 		urb = usb_alloc_urb(0, gfp_flags);
 		if (urb == NULL) {
 			uvc_uninit_video(stream, 1);
@@ -1843,8 +1852,7 @@ static int uvc_init_video(struct uvc_streaming *stream, gfp_t gfp_flags)
 		return ret;
 
 	/* Submit the URBs. */
-	stream->refcnt++;
-	for (i = 0; i < stream->max_urb; ++i) {
+	for (i = 0; i < UVC_URBS; ++i) {
 		ret = usb_submit_urb(stream->urb[i], gfp_flags);
 		if (ret < 0) {
 			uvc_printk(KERN_ERR, "Failed to submit URB %u "
@@ -2004,9 +2012,6 @@ int uvc_video_init(struct uvc_streaming *stream)
 	stream->def_format = format;
 	stream->cur_format = format;
 	stream->cur_frame = frame;
-
-	stream->max_urb = UVC_URBS;
-	stream->max_urb_packets = UVC_MAX_PACKETS;
 
 	/* Select the video decoding function */
 	if (stream->type == V4L2_BUF_TYPE_VIDEO_CAPTURE) {

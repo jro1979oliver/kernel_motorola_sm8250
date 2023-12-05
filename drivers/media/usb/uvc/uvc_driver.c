@@ -2093,71 +2093,6 @@ struct uvc_device_info {
 	u32	meta_format;
 };
 
-/* ------------------------------------------------------------------------
- * set urb queue size and urb packet size
- *
- */
-static ssize_t store_urb_config(struct device *dev,
-		struct device_attribute *attr, const char *buff, size_t count)
-{
-	struct uvc_streaming *stream;
-	struct usb_interface *intf = to_usb_interface(dev);
-	struct uvc_device *udev = usb_get_intfdata(intf);
-	long max_urb, max_urb_packets;
-	int ret;
-	char *arr, *tmp;
-
-	arr = kstrdup(buff, GFP_KERNEL);
-
-	if (!arr)
-		return -ENOMEM;
-
-	tmp = strsep(&arr, ":");
-
-	if (!tmp)
-		return -EINVAL;
-
-	ret = kstrtol(tmp, 10, &max_urb);
-		if (ret < 0)
-			return ret;
-
-	tmp = strsep(&arr, ":");
-	if (!tmp)
-		return -EINVAL;
-
-	ret = kstrtol(tmp, 10, &max_urb_packets);
-		if (ret < 0)
-			return ret;
-
-	if (max_urb <= 0 || max_urb > 128 ||
-		max_urb_packets <= 0 || max_urb_packets > 128)
-		return -EINVAL;
-
-	list_for_each_entry(stream, &udev->streams, list) {
-		if (stream->refcnt)
-			continue;
-		stream->max_urb = max_urb;
-		stream->max_urb_packets = max_urb_packets;
-	}
-
-	return count;
-}
-
-static ssize_t show_urb_config(struct device *dev,
-		struct device_attribute *attr, char *buff)
-{
-	return 0;
-}
-
-static struct device_attribute urb_config_attr = {
-	.attr = {
-		.name = "urb_config",
-		.mode = 00660,
-	},
-	.show = show_urb_config,
-	.store = store_urb_config,
-};
-
 static int uvc_probe(struct usb_interface *intf,
 		     const struct usb_device_id *id)
 {
@@ -2290,12 +2225,6 @@ static int uvc_probe(struct usb_interface *intf,
 
 	uvc_trace(UVC_TRACE_PROBE, "UVC device initialized.\n");
 	usb_enable_autosuspend(udev);
-
-	/* sysfs file for dynamically setting urb configs */
-	ret = sysfs_create_file(&dev->intf->dev.kobj, &urb_config_attr.attr);
-	if (ret != 0)
-		pr_info("Unable to initialize urb configuration: %d\n", ret);
-
 	return 0;
 
 error:
@@ -2458,6 +2387,10 @@ static const struct uvc_device_info uvc_quirk_probe_def = {
 
 static const struct uvc_device_info uvc_quirk_stream_no_fid = {
 	.quirks = UVC_QUIRK_STREAM_NO_FID,
+};
+
+static const struct uvc_device_info uvc_quirk_override_timestamps = {
+	.quirks = UVC_QUIRK_OVERRIDE_TIMESTAMPS,
 };
 
 static const struct uvc_device_info uvc_quirk_force_y8 = {
@@ -2819,6 +2752,15 @@ static const struct usb_device_id uvc_ids[] = {
 	  .bInterfaceSubClass	= 1,
 	  .bInterfaceProtocol	= 0,
 	  .driver_info		= (kernel_ulong_t)&uvc_quirk_stream_no_fid },
+	/* Lenovo ThinkReality A3 */
+	{ .match_flags		= USB_DEVICE_ID_MATCH_DEVICE
+				| USB_DEVICE_ID_MATCH_INT_INFO,
+	  .idVendor		= 0x17ef,
+	  .idProduct		= 0xb813,
+	  .bInterfaceClass	= USB_CLASS_VIDEO,
+	  .bInterfaceSubClass	= 1,
+	  .bInterfaceProtocol	= 1,
+	  .driver_info		= (kernel_ulong_t)&uvc_quirk_override_timestamps },
 	/* Aveo Technology USB 2.0 Camera */
 	{ .match_flags		= USB_DEVICE_ID_MATCH_DEVICE
 				| USB_DEVICE_ID_MATCH_INT_INFO,
